@@ -1,7 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createGame, getGame, joinGame, markDisconnected, restartGame, startGame, startNextHand } from "../gameManager";
-import { getActingSeatId } from "@/lib/poker/handOrchestrator";
-import type { BlindScheduleConfig } from "@/lib/poker/types";
+import {
+  buildClientView,
+  createGame,
+  ensureActionTimer,
+  getActionDeadlineMs,
+  getGame,
+  hasUnrevealedCommunityCards,
+  joinGame,
+  markDisconnected,
+  restartGame,
+  revealNextCommunityCard,
+  startGame,
+  startNextHand,
+  submitAction,
+} from "../gameManager";
+import { getActingSeatId, getLegalActionsForSeat } from "@/lib/poker/handOrchestrator";
+import type { BlindScheduleConfig, TableState } from "@/lib/poker/types";
 
 const SETTINGS: BlindScheduleConfig = {
   startingChips: 5000,
@@ -19,56 +33,37 @@ function setUpTwoPlayerGame() {
   return { gameId, hostId, guestId };
 }
 
-describe("disconnect grace period", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
+/** Drives the current actor to check if possible, otherwise call. */
+function actPassively(table: TableState, gameId: string): void {
+  const seatId = getActingSeatId(table)!;
+  const actions = getLegalActionsForSeat(table, seatId);
+  const action = actions.find((a) => a.type === "check") ?? actions.find((a) => a.type === "call");
+  submitAction(gameId, seatId, { type: action!.type });
+}
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("does not fold the acting player immediately on disconnect", () => {
-    const { gameId } = setUpTwoPlayerGame();
+describe("connection-based hand eligibility", () => {
+  it("excludes a disconnected seat from the next hand, and re-includes it after reconnecting", () => {
+    const { gameId, playerId: hostId } = createGame("Alice", SETTINGS);
+    const { playerId: bobId } = joinGame(gameId, "Bob");
+    const { playerId: charlieId } = joinGame(gameId, "Charlie");
+    startGame(gameId, hostId);
     const table = getGame(gameId)!;
-    const actingSeatId = getActingSeatId(table)!;
 
-    let graceExpired = 0;
-    markDisconnected(gameId, actingSeatId, () => graceExpired++);
+    markDisconnected(gameId, bobId);
+    table.currentHand = null;
+    startNextHand(table);
 
-    expect(getActingSeatId(table)).toBe(actingSeatId); // still their turn, not folded yet
-    expect(graceExpired).toBe(0);
-  });
+    expect(table.status).toBe("in-progress"); // Alice + Charlie are still eligible
+    const handAfterDisconnect = getGame(gameId)!.currentHand!;
+    expect(handAfterDisconnect.holeCards.has(bobId)).toBe(false);
+    expect(handAfterDisconnect.holeCards.has(hostId)).toBe(true);
+    expect(handAfterDisconnect.holeCards.has(charlieId)).toBe(true);
 
-  it("cancels the pending fold if the player reconnects within the grace period", () => {
-    const { gameId } = setUpTwoPlayerGame();
-    const table = getGame(gameId)!;
-    const actingSeatId = getActingSeatId(table)!;
-
-    let graceExpired = 0;
-    markDisconnected(gameId, actingSeatId, () => graceExpired++);
-
-    vi.advanceTimersByTime(10000); // well under the grace period
-    joinGame(gameId, "", actingSeatId); // reconnect
-
-    vi.advanceTimersByTime(60000); // now run well past the original grace period
-    expect(graceExpired).toBe(0);
-    expect(getActingSeatId(table)).toBe(actingSeatId); // never got auto-folded
-  });
-
-  it("auto-folds the acting player once the grace period elapses without reconnecting", () => {
-    const { gameId } = setUpTwoPlayerGame();
-    const table = getGame(gameId)!;
-    const actingSeatId = getActingSeatId(table)!;
-
-    let graceExpired = 0;
-    markDisconnected(gameId, actingSeatId, () => graceExpired++);
-
-    vi.advanceTimersByTime(20001);
-
-    expect(graceExpired).toBe(1);
-    // The hand should have ended immediately in the other player's favor (heads-up fold).
-    expect(table.currentHand?.street).toBe("complete");
+    joinGame(gameId, "", bobId); // reconnect
+    table.currentHand = null;
+    startNextHand(table);
+    const handAfterReconnect = getGame(gameId)!.currentHand!;
+    expect(handAfterReconnect.holeCards.has(bobId)).toBe(true);
   });
 });
 
@@ -93,5 +88,98 @@ describe("restartGame", () => {
     expect(table.currentHand).not.toBeNull();
     expect(hostSeat.stack).toBe(SETTINGS.startingChips);
     expect(guestSeat.stack).toBe(SETTINGS.startingChips);
+  });
+});
+
+describe("ensureActionTimer", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("auto-acts (check/call, never fold) for the acting player once the timer expires", () => {
+    const { gameId } = setUpTwoPlayerGame();
+    const table = getGame(gameId)!;
+    const actingSeatId = getActingSeatId(table)!;
+
+    let timeouts = 0;
+    ensureActionTimer(table, () => timeouts++);
+    expect(getActingSeatId(table)).toBe(actingSeatId); // no action taken yet
+
+    vi.advanceTimersByTime(20001);
+
+    expect(timeouts).toBe(1);
+    expect(getActingSeatId(table)).not.toBe(actingSeatId); // engine advanced past their turn
+  });
+
+  it("does not restart the countdown when called again mid-turn", () => {
+    const { gameId } = setUpTwoPlayerGame();
+    const table = getGame(gameId)!;
+
+    ensureActionTimer(table, () => {});
+    const firstDeadline = getActionDeadlineMs(gameId);
+
+    vi.advanceTimersByTime(5000);
+    ensureActionTimer(table, () => {}); // e.g. triggered by an unrelated broadcast
+    expect(getActionDeadlineMs(gameId)).toBe(firstDeadline);
+  });
+
+  it("does not start a timer while the board still has unrevealed community cards", () => {
+    const { gameId } = setUpTwoPlayerGame();
+    const table = getGame(gameId)!;
+    actPassively(table, gameId); // dealer/SB calls
+    actPassively(table, gameId); // BB checks, closing preflop — 3 flop cards computed but not yet revealed
+    expect(hasUnrevealedCommunityCards(table)).toBe(true);
+
+    ensureActionTimer(table, () => {});
+    expect(getActionDeadlineMs(gameId)).toBeNull();
+  });
+});
+
+describe("staggered community card reveal", () => {
+  it("reveals community cards one at a time instead of all at once", () => {
+    const { gameId, hostId } = setUpTwoPlayerGame();
+    const table = getGame(gameId)!;
+
+    actPassively(table, gameId); // dealer/SB calls
+    actPassively(table, gameId); // BB checks, closing preflop
+    expect(table.currentHand?.street).toBe("flop");
+    expect(table.currentHand?.communityCards).toHaveLength(3);
+
+    expect(buildClientView(table, hostId).communityCards).toHaveLength(0);
+    expect(hasUnrevealedCommunityCards(table)).toBe(true);
+
+    revealNextCommunityCard(table);
+    expect(buildClientView(table, hostId).communityCards).toHaveLength(1);
+
+    revealNextCommunityCard(table);
+    revealNextCommunityCard(table);
+    expect(buildClientView(table, hostId).communityCards).toHaveLength(3);
+    expect(hasUnrevealedCommunityCards(table)).toBe(false);
+  });
+
+  it("shows all-in showdown hole cards immediately but hides the win banner until the board catches up", () => {
+    const { gameId, hostId } = setUpTwoPlayerGame();
+    const table = getGame(gameId)!;
+
+    const firstActor = getActingSeatId(table)!;
+    submitAction(gameId, firstActor, { type: "all-in" });
+    const secondActor = getActingSeatId(table)!;
+    submitAction(gameId, secondActor, { type: "all-in" });
+
+    expect(table.currentHand?.street).toBe("complete");
+    expect(hasUnrevealedCommunityCards(table)).toBe(true); // engine resolved instantly, board not shown yet
+
+    const midView = buildClientView(table, hostId);
+    expect(midView.lastHandResults).toBeNull(); // banner withheld
+    const opponentSeat = midView.seats.find((s) => s.seatId !== hostId)!;
+    expect(opponentSeat.holeCards).toBeDefined(); // but hands are already face-up
+
+    while (hasUnrevealedCommunityCards(table)) revealNextCommunityCard(table);
+    const finalView = buildClientView(table, hostId);
+    expect(finalView.lastHandResults).not.toBeNull();
   });
 });

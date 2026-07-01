@@ -1,8 +1,19 @@
 import type { ClientSeatView } from "@/lib/socketEvents";
 import { CardBack, PlayingCard } from "./PlayingCard";
 import { ChipStack } from "./ChipStack";
+import { ActionCountdown } from "./ActionCountdown";
 
-export function Seat({ seat, isViewer, isWinner }: { seat: ClientSeatView; isViewer: boolean; isWinner?: boolean }) {
+export function Seat({
+  seat,
+  isViewer,
+  isWinner,
+  actionDeadlineMs,
+}: {
+  seat: ClientSeatView;
+  isViewer: boolean;
+  isWinner?: boolean;
+  actionDeadlineMs?: number | null;
+}) {
   return (
     <div
       className={`flex w-[17.5vh] min-w-[135px] flex-col items-center gap-1 rounded-2xl p-2.5 transition ${
@@ -13,6 +24,7 @@ export function Seat({ seat, isViewer, isWinner }: { seat: ClientSeatView; isVie
             : "bg-zinc-900/70 ring-1 ring-zinc-800"
       } ${seat.hasFolded ? "opacity-40" : ""}`}
     >
+      {seat.isActing && actionDeadlineMs != null && <ActionCountdown deadlineMs={actionDeadlineMs} />}
       <div className="flex h-[10vh] gap-1.5">
         {seat.holeCards ? (
           seat.holeCards.map((c, i) => <PlayingCard key={i} card={c} />)

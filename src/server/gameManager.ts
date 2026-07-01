@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "crypto";
 import { buildBlindSchedule, getCurrentBlindLevel, getMsUntilNextLevel } from "@/lib/poker/blindSchedule";
 import { HAND_CATEGORY_LABELS } from "@/lib/poker/handLabels";
-import { applyPlayerAction, canStartHand, forceFold, getActingSeatId, getLegalActionsForSeat, startHand } from "@/lib/poker/handOrchestrator";
+import { applyPlayerAction, canStartHand, getActingSeatId, getLegalActionsForSeat, startHand } from "@/lib/poker/handOrchestrator";
 import { PokerEngineError } from "@/lib/poker/handOrchestrator";
 import type { BlindScheduleConfig, PlayerAction, Seat, TableState } from "@/lib/poker/types";
 import type { ClientGameView, ClientHandResult, ClientSeatView } from "@/lib/socketEvents";
@@ -61,7 +61,6 @@ export function joinGame(gameId: string, name: string, existingPlayerId?: string
     const seat = table.seats.find((s) => s.playerId === existingPlayerId);
     if (seat) {
       seat.isConnected = true;
-      cancelPendingDisconnectFold(gameId, existingPlayerId);
       return { playerId: seat.playerId };
     }
   }
@@ -83,59 +82,15 @@ export function joinGame(gameId: string, name: string, existingPlayerId?: string
   return { playerId };
 }
 
-/** If the player whose turn it currently is has disconnected, auto-fold them (and keep
- *  doing so for consecutive disconnected players) so the table never stalls waiting
- *  for someone who isn't there. */
-function settleDisconnectedAutoActions(table: TableState): void {
-  let guard = 0;
-  while (table.currentHand && table.currentHand.street !== "complete" && guard++ < 100) {
-    const actingSeatId = getActingSeatId(table);
-    if (!actingSeatId) break;
-    const seat = table.seats.find((s) => s.playerId === actingSeatId);
-    if (!seat || seat.isConnected) break;
-    forceFold(table, actingSeatId);
-  }
-}
-
-// A brief network blip or backgrounded mobile tab shouldn't cost someone their hand —
-// give a reconnecting player a grace period before actually auto-folding them.
-const DISCONNECT_GRACE_MS = 20000;
-const pendingDisconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-function disconnectTimerKey(gameId: string, playerId: string): string {
-  return `${gameId}:${playerId}`;
-}
-
-function cancelPendingDisconnectFold(gameId: string, playerId: string): void {
-  const key = disconnectTimerKey(gameId, playerId);
-  const pending = pendingDisconnectTimers.get(key);
-  if (pending) {
-    clearTimeout(pending);
-    pendingDisconnectTimers.delete(key);
-  }
-}
-
-/** Marks a player disconnected and, unless they reconnect within the grace period,
- *  auto-folds them if it's their turn. `onGraceExpired` lets the caller broadcast the
- *  updated state after the delayed fold actually happens. */
-export function markDisconnected(gameId: string, playerId: string, onGraceExpired: () => void): void {
+/** A disconnected seat stays visible at the table (so it can rejoin later) but is
+ *  excluded from being dealt into new hands — no blinds, no cards — until it
+ *  reconnects. Mid-hand, the general action timer covers them via auto-call/check. */
+export function markDisconnected(gameId: string, playerId: string): void {
   const table = games.get(gameId);
   if (!table) return;
   const seat = table.seats.find((s) => s.playerId === playerId);
   if (!seat) return;
   seat.isConnected = false;
-
-  cancelPendingDisconnectFold(gameId, playerId);
-  const key = disconnectTimerKey(gameId, playerId);
-  const timer = setTimeout(() => {
-    pendingDisconnectTimers.delete(key);
-    const latestTable = games.get(gameId);
-    const latestSeat = latestTable?.seats.find((s) => s.playerId === playerId);
-    if (!latestTable || !latestSeat || latestSeat.isConnected) return; // reconnected in time
-    settleDisconnectedAutoActions(latestTable);
-    onGraceExpired();
-  }, DISCONNECT_GRACE_MS);
-  pendingDisconnectTimers.set(key, timer);
 }
 
 export function startGame(gameId: string, requestingPlayerId: string): void {
@@ -157,7 +112,6 @@ export function startNextHand(table: TableState): void {
     return;
   }
   startHand(table, level.bigBlind, level.smallBlind);
-  settleDisconnectedAutoActions(table);
 }
 
 /** Resets every seat back to the starting stack, restarts the blind schedule from
@@ -192,18 +146,130 @@ export function submitAction(gameId: string, playerId: string, action: PlayerAct
   const seq = (actionSeqCounters.get(gameId) ?? 0) + 1;
   actionSeqCounters.set(gameId, seq);
   lastActions.set(gameId, { type: action.type, seatId: playerId, seq });
-  settleDisconnectedAutoActions(table);
+}
+
+// --- Staggered community-card reveal -----------------------------------------------
+//
+// The hand engine computes an entire hand (including an all-in run-out to showdown)
+// instantly and synchronously. To make the board feel like it's being dealt one card
+// at a time instead of dumped on screen all at once, we hold back how many of the
+// engine's already-computed community cards are shown to clients, and reveal one more
+// every REVEAL_STEP_MS via `revealNextCommunityCard` (driven by the socket layer).
+
+interface RevealProgress {
+  revealedCommunityCount: number;
+  handNumberForReveal: number;
+}
+const revealProgress = new Map<string, RevealProgress>();
+
+function getRevealProgress(table: TableState): RevealProgress {
+  let progress = revealProgress.get(table.gameId);
+  if (!progress || progress.handNumberForReveal !== table.handNumber) {
+    progress = { revealedCommunityCount: 0, handNumberForReveal: table.handNumber };
+    revealProgress.set(table.gameId, progress);
+  }
+  return progress;
+}
+
+function visibleCommunityCount(table: TableState): number {
+  const hand = table.currentHand;
+  if (!hand) return 0;
+  return Math.min(getRevealProgress(table).revealedCommunityCount, hand.communityCards.length);
+}
+
+/** True while there are more community cards already computed than shown to clients. */
+export function hasUnrevealedCommunityCards(table: TableState): boolean {
+  const hand = table.currentHand;
+  if (!hand) return false;
+  return visibleCommunityCount(table) < hand.communityCards.length;
+}
+
+/** Reveals one more community card to clients. */
+export function revealNextCommunityCard(table: TableState): void {
+  const progress = getRevealProgress(table);
+  progress.revealedCommunityCount += 1;
+}
+
+// --- Per-turn action timer -----------------------------------------------------------
+//
+// Whoever's turn it is gets ACTION_TIMER_MS to act (this covers both a disconnected
+// player, who can never act, and someone simply thinking too long). On expiry we act
+// on their behalf with the most passive legal option — call if there's a bet to match,
+// otherwise check — never fold, so a brief absence doesn't cost anyone their hand.
+
+const ACTION_TIMER_MS = 20000;
+
+interface ActionTimerState {
+  seatId: string;
+  deadlineMs: number;
+  timer: ReturnType<typeof setTimeout>;
+}
+const actionTimers = new Map<string, ActionTimerState>();
+
+function clearActionTimer(gameId: string): void {
+  const existing = actionTimers.get(gameId);
+  if (existing) {
+    clearTimeout(existing.timer);
+    actionTimers.delete(gameId);
+  }
+}
+
+function computeTimeoutAction(table: TableState, seatId: string): PlayerAction {
+  const actions = getLegalActionsForSeat(table, seatId);
+  if (actions.some((a) => a.type === "check")) return { type: "check" };
+  if (actions.some((a) => a.type === "call")) return { type: "call" };
+  return { type: "fold" }; // only reachable if neither check nor call is legal
+}
+
+/** Makes sure a timer is ticking for whoever's turn it currently is. No-ops if a timer
+ *  for that exact seat/turn is already running, or if the board is still mid-reveal
+ *  (the action bar is hidden client-side until the reveal animation catches up). */
+export function ensureActionTimer(table: TableState, onTimeout: () => void): void {
+  if (hasUnrevealedCommunityCards(table)) return;
+
+  const actingSeatId = getActingSeatId(table);
+  if (!actingSeatId) {
+    clearActionTimer(table.gameId);
+    return;
+  }
+
+  const existing = actionTimers.get(table.gameId);
+  if (existing && existing.seatId === actingSeatId) return;
+
+  clearActionTimer(table.gameId);
+  const deadlineMs = Date.now() + ACTION_TIMER_MS;
+  const timer = setTimeout(() => {
+    actionTimers.delete(table.gameId);
+    const latest = games.get(table.gameId);
+    if (!latest || getActingSeatId(latest) !== actingSeatId) return;
+    try {
+      applyPlayerAction(latest, actingSeatId, computeTimeoutAction(latest, actingSeatId));
+    } catch {
+      // Best-effort: if state shifted underneath us, just skip this tick.
+    }
+    onTimeout();
+  }, ACTION_TIMER_MS);
+  actionTimers.set(table.gameId, { seatId: actingSeatId, deadlineMs, timer });
+}
+
+export function getActionDeadlineMs(gameId: string): number | null {
+  return actionTimers.get(gameId)?.deadlineMs ?? null;
 }
 
 export function buildClientView(table: TableState, viewerPlayerId: string): ClientGameView {
   const hand = table.currentHand;
   const actingSeatId = getActingSeatId(table);
   const dealerSeatIndex = hand ? hand.dealerSeatIndex : table.dealerSeatIndex;
+  const revealedCount = visibleCommunityCount(table);
+  const boardFullyRevealed = !hand || revealedCount >= hand.communityCards.length;
 
   const seats: ClientSeatView[] = table.seats.map((seat, index) => {
     const bettingPlayer = hand?.bettingState.players[index];
     const isMe = seat.playerId === viewerPlayerId;
     const showdownEntry = hand?.results?.find((r) => r.seatId === seat.seatId);
+    // Showdown hole cards are revealed as soon as they're computed, even before the
+    // board finishes dealing out and before the win banner appears — cards go face up
+    // first, then the remaining community cards land one by one, then the result shows.
     const holeCardsForViewer = isMe ? hand?.holeCards.get(seat.seatId) : showdownEntry?.holeCards;
 
     return {
@@ -222,7 +288,7 @@ export function buildClientView(table: TableState, viewerPlayerId: string): Clie
   });
 
   const lastHandResults: ClientHandResult[] | null =
-    hand?.street === "complete" && hand.results
+    hand?.street === "complete" && hand.results && boardFullyRevealed
       ? hand.results.map((r) => ({
           seatId: r.seatId,
           amountWon: r.amountWon,
@@ -250,15 +316,16 @@ export function buildClientView(table: TableState, viewerPlayerId: string): Clie
     currentBlindLevel,
     msUntilNextBlindLevel,
     seats,
-    communityCards: hand?.communityCards ?? [],
+    communityCards: hand ? hand.communityCards.slice(0, revealedCount) : [],
     pots: hand?.pots ?? [],
     street: hand?.street ?? "waiting",
     actingSeatId,
-    legalActionsForViewer: getLegalActionsForSeat(table, viewerPlayerId),
+    legalActionsForViewer: boardFullyRevealed ? getLegalActionsForSeat(table, viewerPlayerId) : [],
     currentBetToMatch: hand?.bettingState.currentBetToMatch ?? 0,
     minRaiseIncrement: hand?.bettingState.minRaiseIncrement ?? table.settings.startingBigBlind,
     lastHandResults,
     handNumber: table.handNumber,
     lastAction: lastActions.get(table.gameId) ?? null,
+    actionDeadlineMs: getActionDeadlineMs(table.gameId),
   };
 }

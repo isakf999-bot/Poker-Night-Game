@@ -57,6 +57,10 @@ export interface ClientGameView {
   lastHandResults: ClientHandResult[] | null;
   handNumber: number;
   lastAction: LastActionEvent | null;
+  /** Absolute timestamp (Date.now()-comparable) when the acting seat will be
+   *  auto-called/checked for if they haven't acted by then. Null when no turn timer
+   *  is running (e.g. between hands, or while the board is still being revealed). */
+  actionDeadlineMs: number | null;
 }
 
 export interface CreateGamePayload {

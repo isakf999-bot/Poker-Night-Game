@@ -2,11 +2,14 @@ import type { Server, Socket } from "socket.io";
 import {
   buildClientView,
   createGame,
+  ensureActionTimer,
   getGame,
+  hasUnrevealedCommunityCards,
   joinGame,
   markDisconnected,
   PokerEngineError,
   restartGame,
+  revealNextCommunityCard,
   startGame,
   startNextHand,
   submitAction,
@@ -15,6 +18,12 @@ import type { ClientToServerEvents, ServerToClientEvents } from "@/lib/socketEve
 
 const HAND_RESULT_DISPLAY_MS = 6500;
 const GAME_RESTART_DELAY_MS = 15000;
+const REVEAL_STEP_MS = 650;
+
+// Guards against scheduling more than one reveal chain per game — broadcastGameState
+// can be triggered from several places (an action, a disconnect, a reveal step itself)
+// while a reveal is still catching up, and we only want a single ticking chain.
+const revealInFlight = new Set<string>();
 
 type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents> & {
   data: { gameId?: string; playerId?: string };
@@ -28,6 +37,11 @@ function errorMessage(err: unknown): string {
 export function broadcastGameState(io: Server<ClientToServerEvents, ServerToClientEvents>, gameId: string): void {
   const table = getGame(gameId);
   if (!table) return;
+
+  // Must run before building client views below, so the deadline it sets (or refreshes)
+  // is actually included in this broadcast instead of only showing up on the next one.
+  ensureActionTimer(table, () => broadcastGameState(io, gameId));
+
   const sockets = io.sockets.adapter.rooms.get(gameId);
   if (!sockets) return;
   for (const socketId of sockets) {
@@ -36,7 +50,20 @@ export function broadcastGameState(io: Server<ClientToServerEvents, ServerToClie
     socket.emit("game_state", buildClientView(table, socket.data.playerId));
   }
 
-  if (table.currentHand?.street === "complete" && table.status === "in-progress") {
+  // Deal out any still-hidden community cards one at a time (dramatic reveal) instead
+  // of dumping the whole board on screen the instant the engine finishes computing it.
+  if (hasUnrevealedCommunityCards(table) && !revealInFlight.has(gameId)) {
+    revealInFlight.add(gameId);
+    setTimeout(() => {
+      revealInFlight.delete(gameId);
+      const latest = getGame(gameId);
+      if (!latest) return;
+      revealNextCommunityCard(latest);
+      broadcastGameState(io, gameId);
+    }, REVEAL_STEP_MS);
+  }
+
+  if (table.currentHand?.street === "complete" && table.status === "in-progress" && !hasUnrevealedCommunityCards(table)) {
     setTimeout(() => {
       const latest = getGame(gameId);
       if (!latest || latest.currentHand?.street !== "complete") return;
@@ -106,7 +133,7 @@ export function registerSocketHandlers(io: Server<ClientToServerEvents, ServerTo
     socket.on("disconnect", () => {
       const { gameId, playerId } = socket.data;
       if (!gameId || !playerId) return;
-      markDisconnected(gameId, playerId, () => broadcastGameState(io, gameId));
+      markDisconnected(gameId, playerId);
       broadcastGameState(io, gameId);
     });
   });

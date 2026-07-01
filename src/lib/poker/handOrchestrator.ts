@@ -24,11 +24,15 @@ import type {
 
 export class PokerEngineError extends Error {}
 
+function isEligibleForHand(seat: { isSittingOut: boolean; isConnected: boolean; stack: number }): boolean {
+  return !seat.isSittingOut && seat.isConnected && seat.stack > 0;
+}
+
 function buildPlayersForHand(table: TableState): PlayerBettingState[] {
   return table.seats.map((seat) => ({
     seatId: seat.seatId,
     stack: seat.stack,
-    status: !seat.isSittingOut && seat.stack > 0 ? "active" : "sitting-out",
+    status: isEligibleForHand(seat) ? "active" : "sitting-out",
     betThisStreet: 0,
     totalCommittedThisHand: 0,
     hasActedThisStreet: false,
@@ -54,7 +58,7 @@ function inHandIndicesFrom(players: PlayerBettingState[], startIndex: number): n
 }
 
 export function eligibleSeatCount(table: TableState): number {
-  return table.seats.filter((s) => !s.isSittingOut && s.stack > 0).length;
+  return table.seats.filter(isEligibleForHand).length;
 }
 
 export function canStartHand(table: TableState): boolean {
@@ -264,10 +268,4 @@ export function applyPlayerAction(table: TableState, seatId: string, action: Pla
 
   applyAction(hand.bettingState, action);
   progressHandState(table);
-}
-
-/** Hook for disconnect/timeout handling: forces a fold for the seat if it is currently their turn. */
-export function forceFold(table: TableState, seatId: string): void {
-  if (getActingSeatId(table) !== seatId) return;
-  applyPlayerAction(table, seatId, { type: "fold" });
 }

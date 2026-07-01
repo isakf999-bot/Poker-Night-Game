@@ -97,7 +97,12 @@ export function Table({ view }: { view: ClientGameView }) {
         const pos = seatPosition(i, orderedSeats.length);
         return (
           <div key={seat.seatId} className="absolute -translate-x-1/2 -translate-y-1/2" style={pos}>
-            <Seat seat={seat} isViewer={seat.seatId === view.viewerPlayerId} isWinner={winnerSeatIds.has(seat.seatId)} />
+            <Seat
+              seat={seat}
+              isViewer={seat.seatId === view.viewerPlayerId}
+              isWinner={winnerSeatIds.has(seat.seatId)}
+              actionDeadlineMs={seat.isActing ? view.actionDeadlineMs : null}
+            />
           </div>
         );
       })}
