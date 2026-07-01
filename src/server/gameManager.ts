@@ -61,6 +61,7 @@ export function joinGame(gameId: string, name: string, existingPlayerId?: string
     const seat = table.seats.find((s) => s.playerId === existingPlayerId);
     if (seat) {
       seat.isConnected = true;
+      cancelPendingDisconnectFold(gameId, existingPlayerId);
       return { playerId: seat.playerId };
     }
   }
@@ -96,13 +97,45 @@ function settleDisconnectedAutoActions(table: TableState): void {
   }
 }
 
-export function markDisconnected(gameId: string, playerId: string): void {
+// A brief network blip or backgrounded mobile tab shouldn't cost someone their hand —
+// give a reconnecting player a grace period before actually auto-folding them.
+const DISCONNECT_GRACE_MS = 20000;
+const pendingDisconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function disconnectTimerKey(gameId: string, playerId: string): string {
+  return `${gameId}:${playerId}`;
+}
+
+function cancelPendingDisconnectFold(gameId: string, playerId: string): void {
+  const key = disconnectTimerKey(gameId, playerId);
+  const pending = pendingDisconnectTimers.get(key);
+  if (pending) {
+    clearTimeout(pending);
+    pendingDisconnectTimers.delete(key);
+  }
+}
+
+/** Marks a player disconnected and, unless they reconnect within the grace period,
+ *  auto-folds them if it's their turn. `onGraceExpired` lets the caller broadcast the
+ *  updated state after the delayed fold actually happens. */
+export function markDisconnected(gameId: string, playerId: string, onGraceExpired: () => void): void {
   const table = games.get(gameId);
   if (!table) return;
   const seat = table.seats.find((s) => s.playerId === playerId);
   if (!seat) return;
   seat.isConnected = false;
-  settleDisconnectedAutoActions(table);
+
+  cancelPendingDisconnectFold(gameId, playerId);
+  const key = disconnectTimerKey(gameId, playerId);
+  const timer = setTimeout(() => {
+    pendingDisconnectTimers.delete(key);
+    const latestTable = games.get(gameId);
+    const latestSeat = latestTable?.seats.find((s) => s.playerId === playerId);
+    if (!latestTable || !latestSeat || latestSeat.isConnected) return; // reconnected in time
+    settleDisconnectedAutoActions(latestTable);
+    onGraceExpired();
+  }, DISCONNECT_GRACE_MS);
+  pendingDisconnectTimers.set(key, timer);
 }
 
 export function startGame(gameId: string, requestingPlayerId: string): void {

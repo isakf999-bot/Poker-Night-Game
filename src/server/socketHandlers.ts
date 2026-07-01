@@ -95,7 +95,7 @@ export function registerSocketHandlers(io: Server<ClientToServerEvents, ServerTo
     socket.on("disconnect", () => {
       const { gameId, playerId } = socket.data;
       if (!gameId || !playerId) return;
-      markDisconnected(gameId, playerId);
+      markDisconnected(gameId, playerId, () => broadcastGameState(io, gameId));
       broadcastGameState(io, gameId);
     });
   });

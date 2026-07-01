@@ -31,8 +31,12 @@ export default function GamePage() {
     }
     socket.on("game_state", onState);
 
-    const storedPlayerId = sessionStorage.getItem(`poker:playerId:${gameId}`);
-    if (storedPlayerId) {
+    // Re-join on every (re)connect, not just on mount — a dropped WebSocket (mobile
+    // tab backgrounded, brief network blip) reconnects with a fresh server-side socket
+    // that has no idea which player/game it belongs to until we tell it again.
+    function rejoin() {
+      const storedPlayerId = sessionStorage.getItem(`poker:playerId:${gameId}`);
+      if (!storedPlayerId) return;
       socket.emit("join_game", { gameId, name: "", existingPlayerId: storedPlayerId }, (res) => {
         if ("error" in res) {
           sessionStorage.removeItem(`poker:playerId:${gameId}`);
@@ -40,9 +44,12 @@ export default function GamePage() {
         }
       });
     }
+    socket.on("connect", rejoin);
+    if (socket.connected) rejoin();
 
     return () => {
       socket.off("game_state", onState);
+      socket.off("connect", rejoin);
     };
   }, [gameId]);
 
