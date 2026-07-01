@@ -38,6 +38,11 @@ export interface ClientHandResult {
   holeCards?: [Card, Card];
 }
 
+export interface ClientEquityEntry {
+  seatId: string;
+  equityPercent: number;
+}
+
 export interface ClientGameView {
   gameId: string;
   status: GameStatus;
@@ -61,6 +66,10 @@ export interface ClientGameView {
    *  auto-called/checked for if they haven't acted by then. Null when no turn timer
    *  is running (e.g. between hands, or while the board is still being revealed). */
   actionDeadlineMs: number | null;
+  /** Live win-probability during an all-in showdown, while the board is still being
+   *  revealed card by card. Null once the board is fully shown (the result banner
+   *  takes over at that point) or when there's no active showdown. */
+  equity: ClientEquityEntry[] | null;
 }
 
 export interface CreateGamePayload {

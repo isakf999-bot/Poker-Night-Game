@@ -182,4 +182,26 @@ describe("staggered community card reveal", () => {
     const finalView = buildClientView(table, hostId);
     expect(finalView.lastHandResults).not.toBeNull();
   });
+
+  it("exposes live win-probability while the all-in board is being revealed, then hides it once shown", () => {
+    const { gameId, hostId, guestId } = setUpTwoPlayerGame();
+    const table = getGame(gameId)!;
+
+    const firstActor = getActingSeatId(table)!;
+    submitAction(gameId, firstActor, { type: "all-in" });
+    const secondActor = getActingSeatId(table)!;
+    submitAction(gameId, secondActor, { type: "all-in" });
+
+    const midView = buildClientView(table, hostId);
+    expect(midView.equity).not.toBeNull();
+    expect(midView.equity).toHaveLength(2);
+    const total = midView.equity!.reduce((sum, e) => sum + e.equityPercent, 0);
+    expect(total).toBeCloseTo(100, 0);
+    const seatIds = midView.equity!.map((e) => e.seatId).sort();
+    expect(seatIds).toEqual([hostId, guestId].sort());
+
+    while (hasUnrevealedCommunityCards(table)) revealNextCommunityCard(table);
+    const finalView = buildClientView(table, hostId);
+    expect(finalView.equity).toBeNull(); // the result banner takes over instead
+  });
 });

@@ -8,11 +8,15 @@ export function Seat({
   isViewer,
   isWinner,
   actionDeadlineMs,
+  equityPercent,
+  currentHandLabel,
 }: {
   seat: ClientSeatView;
   isViewer: boolean;
   isWinner?: boolean;
   actionDeadlineMs?: number | null;
+  equityPercent?: number;
+  currentHandLabel?: string | null;
 }) {
   return (
     <div
@@ -35,6 +39,7 @@ export function Seat({
           </>
         )}
       </div>
+      {isViewer && currentHandLabel && <span className="text-xs font-semibold text-sky-300">{currentHandLabel}</span>}
       <div className="flex items-center gap-1 text-sm font-medium text-zinc-100">
         {seat.isDealer && <span className="rounded-full bg-zinc-100 px-2 text-xs font-bold text-zinc-900">D</span>}
         <span className="truncate max-w-[9rem]">{seat.displayName}</span>
@@ -43,6 +48,9 @@ export function Seat({
       {isWinner && <span className="text-xs font-bold tracking-wide text-emerald-400">WINNER</span>}
       {!seat.isConnected && <span className="text-xs text-red-400">Disconnected</span>}
       {seat.isAllIn && <span className="text-xs font-bold text-red-400">ALL-IN</span>}
+      {equityPercent != null && (
+        <span className="text-xs font-bold text-cyan-300">{equityPercent.toFixed(0)}% to win</span>
+      )}
       <ChipStack amount={seat.stack} />
       {seat.betThisStreet > 0 && <span className="text-xs text-amber-300">Bet: {seat.betThisStreet.toLocaleString("en-US")}</span>}
     </div>

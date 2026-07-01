@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "crypto";
 import { buildBlindSchedule, getCurrentBlindLevel, getMsUntilNextLevel } from "@/lib/poker/blindSchedule";
+import { calculateEquity, type EquityResult } from "@/lib/poker/equity";
 import { HAND_CATEGORY_LABELS } from "@/lib/poker/handLabels";
 import { applyPlayerAction, canStartHand, getActingSeatId, getLegalActionsForSeat, startHand } from "@/lib/poker/handOrchestrator";
 import { PokerEngineError } from "@/lib/poker/handOrchestrator";
@@ -256,6 +257,41 @@ export function getActionDeadlineMs(gameId: string): number | null {
   return actionTimers.get(gameId)?.deadlineMs ?? null;
 }
 
+// --- Win-probability (equity) during an all-in showdown -----------------------------
+//
+// Once a showdown has genuinely happened (2+ players reached results with hole cards
+// shown), everyone's expected share of the pot is public information — recompute it
+// each time another community card is revealed, caching per (hand, revealed count) so
+// a burst of redundant broadcasts doesn't repeat the same expensive calculation.
+
+interface EquityCacheEntry {
+  handNumber: number;
+  revealedCount: number;
+  result: EquityResult[];
+}
+const equityCache = new Map<string, EquityCacheEntry>();
+
+function getEquitySnapshot(table: TableState): EquityResult[] | null {
+  const hand = table.currentHand;
+  if (!hand?.results) return null;
+  const participants = hand.results.filter((r) => r.holeCards != null);
+  if (participants.length < 2) return null; // a fold-win has nothing to compare
+
+  const revealedCount = visibleCommunityCount(table);
+  const cached = equityCache.get(table.gameId);
+  if (cached && cached.handNumber === table.handNumber && cached.revealedCount === revealedCount) {
+    return cached.result;
+  }
+
+  const knownCommunity = hand.communityCards.slice(0, revealedCount);
+  const result = calculateEquity(
+    participants.map((p) => ({ seatId: p.seatId, holeCards: p.holeCards! })),
+    knownCommunity,
+  );
+  equityCache.set(table.gameId, { handNumber: table.handNumber, revealedCount, result });
+  return result;
+}
+
 export function buildClientView(table: TableState, viewerPlayerId: string): ClientGameView {
   const hand = table.currentHand;
   const actingSeatId = getActingSeatId(table);
@@ -327,5 +363,6 @@ export function buildClientView(table: TableState, viewerPlayerId: string): Clie
     handNumber: table.handNumber,
     lastAction: lastActions.get(table.gameId) ?? null,
     actionDeadlineMs: getActionDeadlineMs(table.gameId),
+    equity: boardFullyRevealed ? null : getEquitySnapshot(table),
   };
 }

@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ClientGameView } from "@/lib/socketEvents";
+import { evaluate7 } from "@/lib/poker/handEvaluator";
+import { HAND_CATEGORY_LABELS } from "@/lib/poker/handLabels";
 import { Seat } from "./Seat";
 import { PlayingCard } from "./PlayingCard";
 import { Deck } from "./Deck";
@@ -31,6 +33,15 @@ export function Table({ view }: { view: ClientGameView }) {
 
   const totalPot = view.pots.reduce((sum, p) => sum + p.amount, 0);
   const winnerSeatIds = new Set((view.lastHandResults ?? []).filter((r) => r.amountWon > 0).map((r) => r.seatId));
+  const equityBySeat = new Map((view.equity ?? []).map((e) => [e.seatId, e.equityPercent]));
+
+  // Private to the viewer: what they currently have, computed client-side from cards
+  // only they can see (their own hole cards) plus the community cards everyone sees.
+  const viewerSeat = view.seats.find((s) => s.seatId === view.viewerPlayerId);
+  const viewerHandLabel =
+    viewerSeat?.holeCards && view.communityCards.length >= 3
+      ? HAND_CATEGORY_LABELS[evaluate7([...viewerSeat.holeCards, ...view.communityCards]).rank.category]
+      : null;
 
   const [flyingCards, setFlyingCards] = useState<{ key: string; to: { top: string; left: string } }[]>([]);
   const initialized = useRef(false);
@@ -102,6 +113,8 @@ export function Table({ view }: { view: ClientGameView }) {
               isViewer={seat.seatId === view.viewerPlayerId}
               isWinner={winnerSeatIds.has(seat.seatId)}
               actionDeadlineMs={seat.isActing ? view.actionDeadlineMs : null}
+              equityPercent={equityBySeat.get(seat.seatId)}
+              currentHandLabel={seat.seatId === view.viewerPlayerId ? viewerHandLabel : null}
             />
           </div>
         );
