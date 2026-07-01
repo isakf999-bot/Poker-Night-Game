@@ -124,7 +124,9 @@ export default function GamePage() {
     <div className="flex h-screen flex-col items-center gap-2 overflow-hidden bg-zinc-950 px-4 py-3">
       <div className="flex w-full max-w-6xl shrink-0 items-center justify-between">
         <BlindTimer level={view.currentBlindLevel} msUntilNext={view.msUntilNextBlindLevel} />
-        {view.status === "complete" && <span className="text-sm font-semibold text-amber-300">Game over!</span>}
+        {view.status === "complete" && (
+          <span className="text-sm font-semibold text-amber-300">Game over! New round starting soon...</span>
+        )}
       </div>
 
       <div className="flex min-h-0 w-full max-w-6xl flex-1 items-center justify-center">

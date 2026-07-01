@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createGame, getGame, joinGame, markDisconnected, startGame } from "../gameManager";
+import { createGame, getGame, joinGame, markDisconnected, restartGame, startGame, startNextHand } from "../gameManager";
 import { getActingSeatId } from "@/lib/poker/handOrchestrator";
 import type { BlindScheduleConfig } from "@/lib/poker/types";
 
@@ -69,5 +69,29 @@ describe("disconnect grace period", () => {
     expect(graceExpired).toBe(1);
     // The hand should have ended immediately in the other player's favor (heads-up fold).
     expect(table.currentHand?.street).toBe("complete");
+  });
+});
+
+describe("restartGame", () => {
+  it("resets stacks and the dealer/blind schedule, then deals a fresh hand once the game is over", () => {
+    const { gameId, hostId, guestId } = setUpTwoPlayerGame();
+    const table = getGame(gameId)!;
+
+    // Simulate the guest busting out entirely (host scoops all the chips).
+    const hostSeat = table.seats.find((s) => s.playerId === hostId)!;
+    const guestSeat = table.seats.find((s) => s.playerId === guestId)!;
+    guestSeat.stack = 0;
+    hostSeat.stack = SETTINGS.startingChips * 2;
+    table.currentHand = null;
+    startNextHand(table);
+    expect(table.status).toBe("complete");
+
+    restartGame(table);
+
+    expect(table.status).toBe("in-progress");
+    expect(table.handNumber).toBe(1);
+    expect(table.currentHand).not.toBeNull();
+    expect(hostSeat.stack).toBe(SETTINGS.startingChips);
+    expect(guestSeat.stack).toBe(SETTINGS.startingChips);
   });
 });

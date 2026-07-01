@@ -6,6 +6,7 @@ import {
   joinGame,
   markDisconnected,
   PokerEngineError,
+  restartGame,
   startGame,
   startNextHand,
   submitAction,
@@ -13,6 +14,7 @@ import {
 import type { ClientToServerEvents, ServerToClientEvents } from "@/lib/socketEvents";
 
 const HAND_RESULT_DISPLAY_MS = 6500;
+const GAME_RESTART_DELAY_MS = 15000;
 
 type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents> & {
   data: { gameId?: string; playerId?: string };
@@ -41,6 +43,15 @@ export function broadcastGameState(io: Server<ClientToServerEvents, ServerToClie
       startNextHand(latest);
       broadcastGameState(io, gameId);
     }, HAND_RESULT_DISPLAY_MS);
+  }
+
+  if (table.status === "complete") {
+    setTimeout(() => {
+      const latest = getGame(gameId);
+      if (!latest || latest.status !== "complete") return;
+      restartGame(latest);
+      broadcastGameState(io, gameId);
+    }, GAME_RESTART_DELAY_MS);
   }
 }
 

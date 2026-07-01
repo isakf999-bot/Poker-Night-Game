@@ -160,6 +160,22 @@ export function startNextHand(table: TableState): void {
   settleDisconnectedAutoActions(table);
 }
 
+/** Resets every seat back to the starting stack, restarts the blind schedule from
+ *  level 0, and deals a fresh first hand — used to kick off a brand new round once a
+ *  finished game's post-game pause has elapsed. */
+export function restartGame(table: TableState): void {
+  for (const seat of table.seats) {
+    seat.stack = table.settings.startingChips;
+    seat.isSittingOut = false;
+  }
+  table.dealerSeatIndex = -1;
+  table.handNumber = 0;
+  table.gameStartedAtMs = Date.now();
+  table.status = "in-progress";
+  table.currentHand = null;
+  startNextHand(table);
+}
+
 interface LastActionInfo {
   type: PlayerAction["type"];
   seatId: string;
