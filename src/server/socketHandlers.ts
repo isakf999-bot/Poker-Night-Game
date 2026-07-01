@@ -4,12 +4,14 @@ import {
   createGame,
   ensureActionTimer,
   getGame,
+  getResultsGateRemainingMs,
   hasUnrevealedCommunityCards,
   joinGame,
   markDisconnected,
   PokerEngineError,
   restartGame,
   revealNextCommunityCard,
+  showdownDisplayPending,
   startGame,
   startNextHand,
   submitAction,
@@ -24,6 +26,10 @@ const REVEAL_STEP_MS = 650;
 // can be triggered from several places (an action, a disconnect, a reveal step itself)
 // while a reveal is still catching up, and we only want a single ticking chain.
 const revealInFlight = new Set<string>();
+
+// Same idea for the fixed post-showdown pause (a normal river showdown where the board
+// was already fully visible, so there's no card-by-card reveal to piggyback on).
+const resultsPauseInFlight = new Set<string>();
 
 type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents> & {
   data: { gameId?: string; playerId?: string };
@@ -63,7 +69,28 @@ export function broadcastGameState(io: Server<ClientToServerEvents, ServerToClie
     }, REVEAL_STEP_MS);
   }
 
-  if (table.currentHand?.street === "complete" && table.status === "in-progress" && !hasUnrevealedCommunityCards(table)) {
+  // The post-showdown pause needs its own wake-up call when there's no board left to
+  // stagger (a normal river call-down) — the reveal chain above only reschedules itself
+  // while there are still hidden cards, which isn't the case here.
+  if (showdownDisplayPending(table) && !hasUnrevealedCommunityCards(table) && !resultsPauseInFlight.has(gameId)) {
+    resultsPauseInFlight.add(gameId);
+    setTimeout(
+      () => {
+        resultsPauseInFlight.delete(gameId);
+        const latest = getGame(gameId);
+        if (!latest) return;
+        broadcastGameState(io, gameId);
+      },
+      Math.max(50, getResultsGateRemainingMs(table)),
+    );
+  }
+
+  if (
+    table.currentHand?.street === "complete" &&
+    table.status === "in-progress" &&
+    !hasUnrevealedCommunityCards(table) &&
+    !showdownDisplayPending(table)
+  ) {
     setTimeout(() => {
       const latest = getGame(gameId);
       if (!latest || latest.currentHand?.street !== "complete") return;

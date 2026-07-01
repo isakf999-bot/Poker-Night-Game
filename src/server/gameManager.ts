@@ -292,12 +292,68 @@ function getEquitySnapshot(table: TableState): EquityResult[] | null {
   return result;
 }
 
+// --- Post-showdown display pause -----------------------------------------------------
+//
+// A genuine showdown (2+ players' hole cards revealed) should stay on screen — equity
+// and all — for a moment before the result banner takes over, even when there's no
+// board to stagger (e.g. everyone just checked/called down to a normal river
+// showdown, where all 5 community cards were already visible beforehand).
+
+const RESULTS_DISPLAY_DELAY_MS = 2200;
+
+interface ResultsGate {
+  handNumber: number;
+  readyAtMs: number;
+  ready: boolean;
+}
+const resultsGates = new Map<string, ResultsGate>();
+
+function isGenuineShowdown(hand: TableState["currentHand"]): boolean {
+  return !!hand?.results && hand.results.filter((r) => r.holeCards != null).length >= 2;
+}
+
+function getResultsGate(table: TableState): ResultsGate {
+  let gate = resultsGates.get(table.gameId);
+  if (!gate || gate.handNumber !== table.handNumber) {
+    gate = { handNumber: table.handNumber, readyAtMs: Date.now() + RESULTS_DISPLAY_DELAY_MS, ready: false };
+    resultsGates.set(table.gameId, gate);
+  }
+  return gate;
+}
+
+/** True while a finished showdown's cards/equity should still be on screen instead of
+ *  the result banner — either because the board is still being dealt out card by card,
+ *  or because we're in the fixed pause right after a showdown that didn't need any
+ *  staggering (a normal river call-down, board already fully visible beforehand). */
+export function showdownDisplayPending(table: TableState): boolean {
+  const hand = table.currentHand;
+  if (!hand || hand.street !== "complete" || !isGenuineShowdown(hand)) return false;
+  if (hasUnrevealedCommunityCards(table)) return true;
+
+  const gate = getResultsGate(table);
+  if (gate.ready) return false;
+  if (Date.now() >= gate.readyAtMs) {
+    gate.ready = true;
+    return false;
+  }
+  return true;
+}
+
+/** How long until the post-showdown pause ends and the result banner is ready to show
+ *  (0 if already past that point, e.g. because the board is still being dealt). */
+export function getResultsGateRemainingMs(table: TableState): number {
+  if (hasUnrevealedCommunityCards(table)) return 0;
+  const gate = getResultsGate(table);
+  return Math.max(0, gate.readyAtMs - Date.now());
+}
+
 export function buildClientView(table: TableState, viewerPlayerId: string): ClientGameView {
   const hand = table.currentHand;
   const actingSeatId = getActingSeatId(table);
   const dealerSeatIndex = hand ? hand.dealerSeatIndex : table.dealerSeatIndex;
   const revealedCount = visibleCommunityCount(table);
   const boardFullyRevealed = !hand || revealedCount >= hand.communityCards.length;
+  const showdownPending = showdownDisplayPending(table);
 
   const seats: ClientSeatView[] = table.seats.map((seat, index) => {
     const bettingPlayer = hand?.bettingState.players[index];
@@ -324,7 +380,7 @@ export function buildClientView(table: TableState, viewerPlayerId: string): Clie
   });
 
   const lastHandResults: ClientHandResult[] | null =
-    hand?.street === "complete" && hand.results && boardFullyRevealed
+    hand?.street === "complete" && hand.results && boardFullyRevealed && !showdownPending
       ? hand.results.map((r) => ({
           seatId: r.seatId,
           amountWon: r.amountWon,
@@ -363,6 +419,6 @@ export function buildClientView(table: TableState, viewerPlayerId: string): Clie
     handNumber: table.handNumber,
     lastAction: lastActions.get(table.gameId) ?? null,
     actionDeadlineMs: getActionDeadlineMs(table.gameId),
-    equity: boardFullyRevealed ? null : getEquitySnapshot(table),
+    equity: showdownPending ? getEquitySnapshot(table) : null,
   };
 }

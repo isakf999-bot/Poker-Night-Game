@@ -161,47 +161,94 @@ describe("staggered community card reveal", () => {
     expect(hasUnrevealedCommunityCards(table)).toBe(false);
   });
 
-  it("shows all-in showdown hole cards immediately but hides the win banner until the board catches up", () => {
-    const { gameId, hostId } = setUpTwoPlayerGame();
-    const table = getGame(gameId)!;
+  it("shows all-in showdown hole cards immediately but hides the win banner until the board catches up and the pause elapses", () => {
+    vi.useFakeTimers();
+    try {
+      const { gameId, hostId } = setUpTwoPlayerGame();
+      const table = getGame(gameId)!;
 
-    const firstActor = getActingSeatId(table)!;
-    submitAction(gameId, firstActor, { type: "all-in" });
-    const secondActor = getActingSeatId(table)!;
-    submitAction(gameId, secondActor, { type: "all-in" });
+      const firstActor = getActingSeatId(table)!;
+      submitAction(gameId, firstActor, { type: "all-in" });
+      const secondActor = getActingSeatId(table)!;
+      submitAction(gameId, secondActor, { type: "all-in" });
 
-    expect(table.currentHand?.street).toBe("complete");
-    expect(hasUnrevealedCommunityCards(table)).toBe(true); // engine resolved instantly, board not shown yet
+      expect(table.currentHand?.street).toBe("complete");
+      expect(hasUnrevealedCommunityCards(table)).toBe(true); // engine resolved instantly, board not shown yet
 
-    const midView = buildClientView(table, hostId);
-    expect(midView.lastHandResults).toBeNull(); // banner withheld
-    const opponentSeat = midView.seats.find((s) => s.seatId !== hostId)!;
-    expect(opponentSeat.holeCards).toBeDefined(); // but hands are already face-up
+      const midView = buildClientView(table, hostId);
+      expect(midView.lastHandResults).toBeNull(); // banner withheld
+      const opponentSeat = midView.seats.find((s) => s.seatId !== hostId)!;
+      expect(opponentSeat.holeCards).toBeDefined(); // but hands are already face-up
 
-    while (hasUnrevealedCommunityCards(table)) revealNextCommunityCard(table);
-    const finalView = buildClientView(table, hostId);
-    expect(finalView.lastHandResults).not.toBeNull();
+      while (hasUnrevealedCommunityCards(table)) revealNextCommunityCard(table);
+      expect(buildClientView(table, hostId).lastHandResults).toBeNull(); // still in the post-reveal pause
+
+      vi.advanceTimersByTime(3000); // past the fixed post-showdown pause
+      const finalView = buildClientView(table, hostId);
+      expect(finalView.lastHandResults).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("exposes live win-probability while the all-in board is being revealed, then hides it once shown", () => {
-    const { gameId, hostId, guestId } = setUpTwoPlayerGame();
-    const table = getGame(gameId)!;
+  it("exposes live win-probability while the all-in board is being revealed, then hides it once the pause elapses", () => {
+    vi.useFakeTimers();
+    try {
+      const { gameId, hostId, guestId } = setUpTwoPlayerGame();
+      const table = getGame(gameId)!;
 
-    const firstActor = getActingSeatId(table)!;
-    submitAction(gameId, firstActor, { type: "all-in" });
-    const secondActor = getActingSeatId(table)!;
-    submitAction(gameId, secondActor, { type: "all-in" });
+      const firstActor = getActingSeatId(table)!;
+      submitAction(gameId, firstActor, { type: "all-in" });
+      const secondActor = getActingSeatId(table)!;
+      submitAction(gameId, secondActor, { type: "all-in" });
 
-    const midView = buildClientView(table, hostId);
-    expect(midView.equity).not.toBeNull();
-    expect(midView.equity).toHaveLength(2);
-    const total = midView.equity!.reduce((sum, e) => sum + e.equityPercent, 0);
-    expect(total).toBeCloseTo(100, 0);
-    const seatIds = midView.equity!.map((e) => e.seatId).sort();
-    expect(seatIds).toEqual([hostId, guestId].sort());
+      const midView = buildClientView(table, hostId);
+      expect(midView.equity).not.toBeNull();
+      expect(midView.equity).toHaveLength(2);
+      const total = midView.equity!.reduce((sum, e) => sum + e.equityPercent, 0);
+      expect(total).toBeCloseTo(100, 0);
+      const seatIds = midView.equity!.map((e) => e.seatId).sort();
+      expect(seatIds).toEqual([hostId, guestId].sort());
 
-    while (hasUnrevealedCommunityCards(table)) revealNextCommunityCard(table);
-    const finalView = buildClientView(table, hostId);
-    expect(finalView.equity).toBeNull(); // the result banner takes over instead
+      while (hasUnrevealedCommunityCards(table)) revealNextCommunityCard(table);
+      expect(buildClientView(table, hostId).equity).not.toBeNull(); // still visible during the fixed pause
+
+      vi.advanceTimersByTime(3000);
+      const finalView = buildClientView(table, hostId);
+      expect(finalView.equity).toBeNull(); // the result banner takes over instead
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("also shows equity and a delayed banner for a normal (non-all-in) river showdown", () => {
+    vi.useFakeTimers();
+    try {
+      const { gameId, hostId } = setUpTwoPlayerGame();
+      const table = getGame(gameId)!;
+
+      // Check/call all the way down to a river showdown with no all-in involved. In real
+      // play each street's cards are revealed (and the action bar gated) before the next
+      // action is even possible, so mirror that by catching up the reveal between actions.
+      let guard = 0;
+      while (table.currentHand?.street !== "complete" && guard++ < 50) {
+        while (hasUnrevealedCommunityCards(table)) revealNextCommunityCard(table);
+        actPassively(table, gameId);
+      }
+      while (hasUnrevealedCommunityCards(table)) revealNextCommunityCard(table);
+      expect(table.currentHand?.street).toBe("complete");
+      expect(hasUnrevealedCommunityCards(table)).toBe(false); // board was already fully shown along the way
+
+      const midView = buildClientView(table, hostId);
+      expect(midView.lastHandResults).toBeNull();
+      expect(midView.equity).not.toBeNull();
+
+      vi.advanceTimersByTime(3000);
+      const finalView = buildClientView(table, hostId);
+      expect(finalView.lastHandResults).not.toBeNull();
+      expect(finalView.equity).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
